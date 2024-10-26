@@ -1,0 +1,6 @@
+.env
+*.pdf
+*.lock
+*.toml
+__pycache__
+*.log
