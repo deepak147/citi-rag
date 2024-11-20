@@ -165,7 +165,7 @@ def retrieve(query: str):
     retrieval_prompt = PromptTemplate(
         input_variables=["question", "context"],
         template="""
-        Answer the following customer query in two to three sentences. Be clear, concise, and provide only essential information. The response should focus on general Citibank services, policies, or guidelines and not involve any sensitive customer data or specific account details.
+        Answer the following customer query in one or two bried paragraphs. Be clear, concise, and provide only essential information. The response should focus on general Citibank services, policies, or guidelines and not involve any sensitive customer data or specific account details.
 
         # Customer Query: {question}
 

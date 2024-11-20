@@ -69,10 +69,9 @@ st.header("Citi Bank Interactive Chatbot")
 # Sidebar configuration
 with st.sidebar:
     st.image("https://www.citi.com/CBOL/IA/Angular/assets/citiredesign.svg", width=150)
-    st.title("Citi Bank Assistant")
     st.markdown(
         """
-        Welcome to the Citi Bank Assistant chatbot! Use this interactive chat tool to ask questions about Citi Bank services and get quick, helpful responses.
+        Welcome to the Citi Bank Interactive Chatbot! Use this chat tool to ask questions about Citi Bank services and get quick, helpful responses.
         """
     )
 
