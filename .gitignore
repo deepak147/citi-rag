@@ -4,3 +4,5 @@
 *.toml
 __pycache__
 *.log
+*bank.csv
+ml/
