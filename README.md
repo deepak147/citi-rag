@@ -1,1 +1,1 @@
-# citi-rag
+# CITI Bank AI Assistant
