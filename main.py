@@ -79,7 +79,10 @@ with st.sidebar:
 chat_container = st.container()
 with chat_container:
     for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
+        with st.chat_message(
+            message["role"],
+            avatar="🐼" if message["role"] == "user" else "🏦"
+            ):
             st.markdown(message["content"])
 
 with st.container():
@@ -93,13 +96,13 @@ with st.container():
     st.markdown("</div>", unsafe_allow_html=True)
 
     if send_button and user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
+        st.session_state.messages.append({"role": "user", "content": user_input, "avatar": "👨"})
 
         with st.spinner("Generating response..."):
             response = retrieve(query=user_input)
             bot_response = response
 
-        st.session_state.messages.append({"role": "assistant", "content": bot_response})
+        st.session_state.messages.append({"role": "assistant", "content": bot_response, "avatar": "🏦"})
 
         st.rerun()
 
