@@ -1,8 +1,8 @@
 import streamlit as st
+import asyncio
 from streamlit_chat import message
 from backend.retrieve import retrieve
 
-# Set page config
 st.set_page_config(page_title="Citi Bank Chatbot", page_icon=":bank:", layout="wide")
 
 st.markdown(
@@ -64,6 +64,9 @@ st.markdown(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
 st.header("Citi Bank Interactive Chatbot")
 
 # Sidebar configuration
@@ -76,12 +79,30 @@ with st.sidebar:
     )
 
 chat_container = st.container()
+message_placeholder = st.empty()
+
+
+async def process_response(user_input):
+    full_response = []
+    message_placeholder = st.empty()
+
+    async def collect_chunks():
+        try:
+            async for chunk in retrieve(user_input):
+                full_response.append(chunk)
+                message_placeholder.markdown("".join(full_response))
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+
+    await collect_chunks()
+    return "".join(full_response)
+
+
 with chat_container:
     for message in st.session_state.messages:
         with st.chat_message(
-            message["role"],
-            avatar="🐼" if message["role"] == "user" else "🏦"
-            ):
+            message["role"], avatar="🐼" if message["role"] == "user" else "🏦"
+        ):
             st.markdown(message["content"])
 
 with st.container():
@@ -94,15 +115,24 @@ with st.container():
     send_button = st.button("Send")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if send_button and user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input, "avatar": "👨"})
+    if send_button and user_input and not st.session_state.processing:
+        st.session_state.messages.append(
+            {"role": "user", "content": user_input, "avatar": "👨"}
+        )
 
-        with st.spinner("Generating response..."):
-            response = retrieve(query=user_input)
-            bot_response = response
+        st.session_state.processing = True
 
-        st.session_state.messages.append({"role": "assistant", "content": bot_response, "avatar": "🏦"})
+        with st.chat_message("assistant", avatar="🏦"):
+            response_placeholder = st.empty()
 
+            with st.spinner("Thinking..."):
+                response = asyncio.run(process_response(user_input))
+
+            st.session_state.messages.append(
+                {"role": "assistant", "content": response, "avatar": "🏦"}
+            )
+
+        st.session_state.processing = False
         st.rerun()
 
 st.markdown("<br><br><br>", unsafe_allow_html=True)

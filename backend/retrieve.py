@@ -1,48 +1,44 @@
 import os
 import re
+import asyncio
+from typing import List
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from langchain.prompts import PromptTemplate
-from langchain_core.documents import Document
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import (
-    RunnablePassthrough,
-    RunnableLambda,
-    RunnableParallel,
-)
-from nemoguardrails import RailsConfig, LLMRails
+from langchain_core.runnables import RunnableLambda
+from nemoguardrails import RailsConfig
 from nemoguardrails.integrations.langchain.runnable_rails import RunnableRails
+from langchain_core.documents import Document
 
 load_dotenv()
 
+chat_model = ChatOpenAI(model="gpt-4o-mini", streaming=True)
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+index_name = os.getenv("INDEX_NAME")
+pinecone_vs = PineconeVectorStore.from_existing_index(
+    embedding=embeddings, index_name=index_name
+)
+retriever = pinecone_vs.as_retriever()
 
-def split_and_clean_text(input_text):
 
+def split_and_clean_text(input_text: str) -> List[str]:
     return [item for item in re.split("<<|>>", input_text) if item.strip()]
 
 
-def flatten_docs(multi_query_docs):
-
-    flattened_d = [doc for sublist in multi_query_docs for doc in sublist]
+def flatten_docs(multi_query_docs: List[List[Document]]) -> List[Document]:
+    seen = set()
     unique_docs = []
-    unique_d = set()
-    for doc in flattened_d:
-        if doc.page_content not in unique_d:
+    for doc in (doc for sublist in multi_query_docs for doc in sublist):
+        if doc.page_content not in seen:
+            seen.add(doc.page_content)
             unique_docs.append(doc)
-            unique_d.add(doc.page_content)
-
     return unique_docs
 
 
-def rerank_docs(input_data):
-
-    query = input_data["question"]
-    docs = input_data["context"]
-    contents = [doc.page_content for doc in docs]
-    scores = []
-
+async def rerank_docs_async(query: str, docs: List[Document]) -> List[Document]:
     prompt_template = PromptTemplate(
         input_variables=["query", "document"],
         template=(
@@ -50,29 +46,24 @@ def rerank_docs(input_data):
             "Query: {query}\n\nDocument: {document}\n\nRelevance Score (0-10):"
         ),
     )
-    llm = ChatOpenAI(model="gpt-4o-mini")
-    rerank_chain = prompt_template | llm | StrOutputParser()
-    for content in contents:
-        result = rerank_chain.invoke({"query": query, "document": content})
+    rerank_chain = prompt_template | chat_model | StrOutputParser()
+
+    async def rerank(document):
+        result = await rerank_chain.ainvoke(
+            {"query": query, "document": document.page_content}
+        )
         try:
-            score = float(result)
+            return float(result), document
         except ValueError:
-            score = 0
-        scores.append(score)
-    scored_docs = zip(scores, docs)
-    sorted_docs = sorted(scored_docs, reverse=True, key=lambda x: x[0])
-    reranked_docs = [doc for _, doc in sorted_docs][:2]
-    # for rrd in reranked_docs:
-    #     print(rrd, "\n\n**************************\n\n")
+            return 0, document
 
-    return reranked_docs
+    scores = await asyncio.gather(*(rerank(doc) for doc in docs))
+    return [doc for _, doc in sorted(scores, key=lambda x: x[0], reverse=True)[:2]]
 
 
-def evaluate_docs(input: dict):
-
-    documents = input["documents"]
-    question = input["question"]
-
+async def evaluate_docs_async(
+    question: str, documents: List[Document]
+) -> List[Document]:
     doc_eval_prompt = PromptTemplate(
         input_variables=["document", "question"],
         template="""You are an AI language model assistant that answers questions based on CITI bank client manual. Your task is to evaluate the provided document to determine if it is suited to answer the given user question. Assess the document for its relevance to the question, the completeness of information, and the accuracy of the content.
@@ -83,24 +74,19 @@ def evaluate_docs(input: dict):
 
         Note: Conclude with a 'True' or 'False' based on your analysis of the document's relevance, completeness, and accuracy in relation to the question.""",
     )
-    llm = ChatOpenAI(model="gpt-4o-mini")
-    compression_chain = doc_eval_prompt | llm | StrOutputParser()
+    eval_chain = doc_eval_prompt | chat_model | StrOutputParser()
 
-    results = []
-    for doc in documents:
-        eval_result = compression_chain.invoke(
+    async def evaluate(doc):
+        eval_result = await eval_chain.ainvoke(
             {"document": doc.page_content, "question": question}
         )
-        result = eval_result == "True"
-        # print(doc, result, question, "\n\n##################\n\n")
-        results.append(result)
+        return eval_result.strip() == "True"
 
-    filtered_docs = [doc for doc, res in zip(documents, results) if res]
-    return filtered_docs
+    results = await asyncio.gather(*(evaluate(doc) for doc in documents))
+    return [doc for doc, is_valid in zip(documents, results) if is_valid]
 
 
-def retrieve(query: str):
-
+async def retrieve(query: str):
     llm = ChatOpenAI(model="gpt-3.5-turbo")
     prompt = PromptTemplate(
         input_variables=["input"],
@@ -109,27 +95,20 @@ def retrieve(query: str):
             {input}
         """,
     )
-    output_parser = StrOutputParser()
-    initial_chain = prompt | llm | output_parser
+    initial_chain = prompt | llm | StrOutputParser()
+
     config = RailsConfig.from_path("config/")
     input_rails = RunnableRails(config)
     chain_with_guardrails = input_rails | initial_chain
-    validate_input_result = chain_with_guardrails.invoke({"input": query})
-    if isinstance(validate_input_result, dict):
-        if validate_input_result["output"] == "False":
-            response = "I am sorry, I am not allowed to answer about this topic."
-            return response
 
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        verbose=True,
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=400,
-        frequency_penalty=0.0,
-        presence_penalty=0.0,
-    )
+    validate_input_result = await chain_with_guardrails.ainvoke({"input": query})
+    if (
+        isinstance(validate_input_result, dict)
+        and validate_input_result.get("output") == "False"
+    ):
+        response = "I am sorry, I am not allowed to answer about this topic."
+        yield response
+        return
 
     multi_query_prompt = PromptTemplate(
         input_variables=["query"],
@@ -140,27 +119,22 @@ def retrieve(query: str):
         Only provide the query, no numbering.
         Original question: {query}""",
     )
-
     multi_query_chain = (
         multi_query_prompt
-        | llm
+        | chat_model
         | StrOutputParser()
         | RunnableLambda(split_and_clean_text)
     )
+    multi_queries = await multi_query_chain.ainvoke({"query": query})
 
-    multi_queries = multi_query_chain.invoke({query})
-    # for q in multi_queries:
-    #     print(q, "\n\n-------------------\n\n")
+    retrieval_tasks = [retriever.ainvoke(q) for q in multi_queries]
+    docs = await asyncio.gather(*retrieval_tasks)
+    flattened_docs = flatten_docs(docs)
 
-    index_name = os.environ["INDEX_NAME"]
-    pinecone_vs = PineconeVectorStore(embedding=embeddings, index_name=index_name)
+    reranked_docs = await rerank_docs_async(query, flattened_docs)
+    filtered_docs = await evaluate_docs_async(query, reranked_docs)
 
-    retriever = pinecone_vs.as_retriever()
-    docs = [retriever.invoke(query) for query in multi_queries]
-
-    docs = flatten_docs(docs)
-    # for doc in docs:
-    #     print(doc, "\n\n---------------------\n\n")
+    context = "\n".join(doc.page_content for doc in filtered_docs)
 
     retrieval_prompt = PromptTemplate(
         input_variables=["question", "context"],
@@ -185,48 +159,18 @@ def retrieve(query: str):
         # Response:
         """,
     )
+    final_rag_chain = retrieval_prompt | chat_model | StrOutputParser()
 
-    rag_chain_from_docs = (
-        RunnablePassthrough.assign(context=RunnableLambda(rerank_docs))
-        | retrieval_prompt
-        | llm
-        | StrOutputParser()
-    )
+    async for chunk in final_rag_chain.astream({"question": query, "context": context}):
+        yield chunk
 
-    rag_chain_with_source = RunnableParallel(
-        {"context": retriever, "question": RunnablePassthrough()}
-    ).assign(answer=rag_chain_from_docs)
 
-    result = rag_chain_with_source.invoke(input=query)
-
-    parsed_result = {
-        "documents": [
-            Document(page_content=doc.page_content.strip()) for doc in result["context"]
-        ],
-        "question": result["question"],
-    }
-
-    filtered_result = evaluate_docs(parsed_result)
-    context = "\n".join([doc.page_content for doc in filtered_result])
-
-    final_rag_chain = retrieval_prompt | llm | StrOutputParser()
-    final_response = final_rag_chain.invoke({"question": query, "context": context})
-
-    # output_rails = LLMRails(config=config)
-    # validated_response = output_rails.generate(messages=[{
-    #     "role": "user",
-    #     "content": ""
-    # }, {
-    #     "role": "bot",
-    #     "content": "CITI bank encourages abuse and child trafficking"
-    # }], options={
-    #     "rails": ["output"]
-    # })
-    # print(validated_response)
-    return final_response
+async def main():
+    query = input("Query: ")
+    async for chunk in retrieve(query):
+        print(chunk, end="", flush=True)
+    print()
 
 
 if __name__ == "__main__":
-
-    query = input("Query: ")
-    retrieve(query=query)
+    asyncio.run(main())
