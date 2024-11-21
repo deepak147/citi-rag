@@ -4,6 +4,7 @@ import asyncio
 from typing import List
 
 from dotenv import load_dotenv
+from langfuse.callback import CallbackHandler
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_core.prompts import PromptTemplate
@@ -14,6 +15,12 @@ from nemoguardrails.integrations.langchain.runnable_rails import RunnableRails
 from langchain_core.documents import Document
 
 load_dotenv()
+
+langfuse_handler = CallbackHandler(
+    secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+    public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+    host=os.getenv("LANGFUSE_HOST"),
+)
 
 chat_model = ChatOpenAI(model="gpt-4o-mini", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
@@ -50,7 +57,8 @@ async def rerank_docs_async(query: str, docs: List[Document]) -> List[Document]:
 
     async def rerank(document):
         result = await rerank_chain.ainvoke(
-            {"query": query, "document": document.page_content}
+            {"query": query, "document": document.page_content},
+            config={"callbacks": [langfuse_handler]},
         )
         try:
             return float(result), document
@@ -78,7 +86,8 @@ async def evaluate_docs_async(
 
     async def evaluate(doc):
         eval_result = await eval_chain.ainvoke(
-            {"document": doc.page_content, "question": question}
+            {"document": doc.page_content, "question": question},
+            config={"callbacks": [langfuse_handler]},
         )
         return eval_result.strip() == "True"
 
@@ -101,7 +110,9 @@ async def retrieve(query: str):
     input_rails = RunnableRails(config)
     chain_with_guardrails = input_rails | initial_chain
 
-    validate_input_result = await chain_with_guardrails.ainvoke({"input": query})
+    validate_input_result = await chain_with_guardrails.ainvoke(
+        {"input": query}, config={"callbacks": [langfuse_handler]}
+    )
     if (
         isinstance(validate_input_result, dict)
         and validate_input_result.get("output") == "False"
@@ -125,7 +136,9 @@ async def retrieve(query: str):
         | StrOutputParser()
         | RunnableLambda(split_and_clean_text)
     )
-    multi_queries = await multi_query_chain.ainvoke({"query": query})
+    multi_queries = await multi_query_chain.ainvoke(
+        {"query": query}, config={"callbacks": [langfuse_handler]}
+    )
 
     retrieval_tasks = [retriever.ainvoke(q) for q in multi_queries]
     docs = await asyncio.gather(*retrieval_tasks)
@@ -161,7 +174,10 @@ async def retrieve(query: str):
     )
     final_rag_chain = retrieval_prompt | chat_model | StrOutputParser()
 
-    async for chunk in final_rag_chain.astream({"question": query, "context": context}):
+    async for chunk in final_rag_chain.astream(
+        {"question": query, "context": context},
+        config={"callbacks": [langfuse_handler]},
+    ):
         yield chunk
 
 
